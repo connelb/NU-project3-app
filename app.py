@@ -1,108 +1,91 @@
 import os
-
-import pandas as pd
+import io
 import numpy as np
 
-import sqlalchemy
-from sqlalchemy.ext.automap import automap_base
-from sqlalchemy.orm import Session
-from sqlalchemy import create_engine
+import keras
+from keras.preprocessing import image
+from keras.preprocessing.image import img_to_array
+from keras.applications.xception import (
+    Xception, preprocess_input, decode_predictions)
+from keras import backend as K
 
-from flask import Flask, jsonify, render_template
-from flask_sqlalchemy import SQLAlchemy
+from flask import Flask, request, redirect, url_for, jsonify
 
 app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'Uploads'
+
+model = None
+graph = None
 
 
-#################################################
-# Database Setup
-#################################################
-
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///db/bellybutton.sqlite"
-# db = SQLAlchemy(app)
-db = SQLAlchemy(app)
+def load_model():
+    global model
+    global graph
+    model = Xception(weights="imagenet")
+    graph = K.get_session().graph
 
 
-# reflect an existing database into a new model
-Base = automap_base()
-# reflect the tables
-Base.prepare(db.engine, reflect=True)
-
-# Save references to each table
-Samples_Metadata = Base.classes.sample_metadata
-Samples = Base.classes.samples
+load_model()
 
 
-@app.route("/")
-def index():
-    """Return the homepage."""
-    return render_template("index.html")
+def prepare_image(img):
+    img = img_to_array(img)
+    img = np.expand_dims(img, axis=0)
+    img = preprocess_input(img)
+    # return the processed image
+    return img
 
 
-@app.route("/names")
-def names():
-    """Return a list of sample names."""
+@app.route('/', methods=['GET', 'POST'])
+def upload_file():
+    data = {"success": False}
+    if request.method == 'POST':
+        if request.files.get('file'):
+            # read the file
+            file = request.files['file']
 
-    # Use Pandas to perform the sql query
-    stmt = db.session.query(Samples).statement
-    df = pd.read_sql_query(stmt, db.session.bind)
+            # read the filename
+            filename = file.filename
 
-    # Return a list of the column names (sample names)
-    return jsonify(list(df.columns)[2:])
+            # create a path to the uploads folder
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
 
+            file.save(filepath)
 
-@app.route("/metadata/<sample>")
-def sample_metadata(sample):
-    """Return the MetaData for a given sample."""
+            # Load the saved image using Keras and resize it to the Xception
+            # format of 299x299 pixels
+            image_size = (299, 299)
+            im = keras.preprocessing.image.load_img(filepath,
+                                                    target_size=image_size,
+                                                    grayscale=False)
 
-    sel = [
-        Samples_Metadata.sample,
-        Samples_Metadata.ETHNICITY,
-        Samples_Metadata.GENDER,
-        Samples_Metadata.AGE,
-        Samples_Metadata.LOCATION,
-        Samples_Metadata.BBTYPE,
-        Samples_Metadata.WFREQ,
-    ]
+            # preprocess the image and prepare it for classification
+            image = prepare_image(im)
+            global graph
+            with graph.as_default():
+                preds = model.predict(image)
+                results = decode_predictions(preds)
+                data["predictions"] = []
 
-    results = db.session.query(*sel).filter(Samples_Metadata.sample == sample).all()
+                # loop over the results and add them to the list of
+                # returned predictions
+                for (imagenetID, label, prob) in results[0]:
+                    r = {"label": label, "probability": float(prob)}
+                    data["predictions"].append(r)
 
-    # Create a dictionary entry for each row of metadata information
-    sample_metadata = {}
-    for result in results:
-        sample_metadata["sample"] = result[0]
-        sample_metadata["ETHNICITY"] = result[1]
-        sample_metadata["GENDER"] = result[2]
-        sample_metadata["AGE"] = result[3]
-        sample_metadata["LOCATION"] = result[4]
-        sample_metadata["BBTYPE"] = result[5]
-        sample_metadata["WFREQ"] = result[6]
-
-    #print(sample_metadata)
-    return jsonify(sample_metadata)
-
-
-@app.route("/samples/<sample>")
-def samples(sample):
-    """Return `otu_ids`, `otu_labels`,and `sample_values`."""
-    stmt = db.session.query(Samples).statement
-    df = pd.read_sql_query(stmt, db.session.bind)
-
-    # Filter the data based on the sample number and
-    # only keep rows with values above 1
-    sample_data = df.loc[df[sample] > 1, ["otu_id", "otu_label", sample]]
-    # Format the data to send as json
-    data = {
-        "otu_ids": sample_data.otu_id.values.tolist(),
-        "sample_values": sample_data[sample].values.tolist(),
-        "otu_labels": sample_data.otu_label.tolist(),
-    }
-    #print(sample,data)
-    return jsonify(data)
+                # indicate that the request was a success
+                data["success"] = True
+        return jsonify(data)
+    return '''
+    <!doctype html>
+    <title>Upload new File</title>
+    <h1>Upload new File</h1>
+    <form method=post enctype=multipart/form-data>
+      <p><input type=file name=file>
+         <input type=submit value=Upload>
+    </form>
+    '''
 
 
 if __name__ == "__main__":
-    app.run()
-
-
-
+    app.run(debug=True)
