@@ -1,15 +1,9 @@
 import os
-import io
-import numpy as np
+from flask import Flask, request, jsonify
 
 import keras
 from keras.preprocessing import image
-from keras.preprocessing.image import img_to_array
-from keras.applications.xception import (
-    Xception, preprocess_input, decode_predictions)
 from keras import backend as K
-
-from flask import Flask, request, redirect, url_for, jsonify
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'Uploads'
@@ -17,11 +11,14 @@ app.config['UPLOAD_FOLDER'] = 'Uploads'
 model = None
 graph = None
 
+# Loading a keras model with flask
+# https://blog.keras.io/building-a-simple-keras-deep-learning-rest-api.html
+
 
 def load_model():
     global model
     global graph
-    model = Xception(weights="imagenet")
+    model = keras.models.load_model("mnist_trained.h5")
     graph = K.get_session().graph
 
 
@@ -29,17 +26,24 @@ load_model()
 
 
 def prepare_image(img):
-    img = img_to_array(img)
-    img = np.expand_dims(img, axis=0)
-    img = preprocess_input(img)
-    # return the processed image
-    return img
+    # Convert the image to a numpy array
+    img = image.img_to_array(img)
+    # Scale from 0 to 255
+    img /= 255
+    # Invert the pixels
+    img = 1 - img
+    # Flatten the image to an array of pixels
+    image_array = img.flatten().reshape(-1, 28 * 28)
+    # Return the processed feature array
+    return image_array
 
 
 @app.route('/', methods=['GET', 'POST'])
 def upload_file():
     data = {"success": False}
     if request.method == 'POST':
+        print(request)
+
         if request.files.get('file'):
             # read the file
             file = request.files['file']
@@ -50,32 +54,29 @@ def upload_file():
             # create a path to the uploads folder
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
 
+            # Save the file to the uploads folder
             file.save(filepath)
 
-            # Load the saved image using Keras and resize it to the Xception
-            # format of 299x299 pixels
-            image_size = (299, 299)
-            im = keras.preprocessing.image.load_img(filepath,
-                                                    target_size=image_size,
-                                                    grayscale=False)
+            # Load the saved image using Keras and resize it to the mnist format of 28x28 pixels
+            image_size = (28, 28)
+            im = image.load_img(filepath, target_size=image_size, grayscale=True)
 
-            # preprocess the image and prepare it for classification
-            image = prepare_image(im)
+            # Convert the 2D image to an array of pixel values
+            image_array = prepare_image(im)
+            print(image_array)
+
+            # Get the tensorflow default graph and use it to make predictions
             global graph
             with graph.as_default():
-                preds = model.predict(image)
-                results = decode_predictions(preds)
-                data["predictions"] = []
 
-                # loop over the results and add them to the list of
-                # returned predictions
-                for (imagenetID, label, prob) in results[0]:
-                    r = {"label": label, "probability": float(prob)}
-                    data["predictions"].append(r)
+                # Use the model to make a prediction
+                predicted_digit = model.predict_classes(image_array)[0]
+                data["prediction"] = str(predicted_digit)
 
                 # indicate that the request was a success
                 data["success"] = True
-        return jsonify(data)
+
+            return jsonify(data)
     return '''
     <!doctype html>
     <title>Upload new File</title>
@@ -88,4 +89,4 @@ def upload_file():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run()
